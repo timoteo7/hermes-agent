@@ -683,6 +683,47 @@ def test_named_custom_provider_uses_saved_credentials(monkeypatch):
     assert resolved["source"] == "custom_provider:Local"
 
 
+def test_named_custom_provider_keeps_key_cmd(monkeypatch):
+    """Legacy ``custom_providers`` entries advertising ``key_cmd`` must keep it through named
+    resolution — mirror of the ``providers:`` matcher (``_match_new_style_provider``). Without
+    the lift the entry resolves with no key at all and outbound calls carry the
+    ``no-key-required`` placeholder, 403ing on auth-required endpoints."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "Gateway",
+                    "base_url": "https://gateway.invalid/v1",
+                    "key_cmd": "print-some-token",
+                    "model": "gpt-5.6",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    provider = rp._get_named_custom_provider("gateway")
+
+    assert provider is not None
+    assert provider["key_cmd"] == "print-some-token"
+    resolved = rp.resolve_runtime_provider(requested="gateway")
+    # key_cmd mints per request: the runtime carries a callable token provider, not a
+    # blank/placeholder string.
+    assert callable(resolved["api_key"])
+
+
 def test_named_custom_provider_filters_capabilities_at_lookup_boundary(monkeypatch):
     monkeypatch.setattr(
         rp,
