@@ -6424,7 +6424,23 @@ def _forwards_max_tokens(provider: str, provider_norm: str, model: str, effectiv
     NVIDIA NIM (empty choices[] when omitted); MoA reference slots; Gemini native (fixed 65,535
     ceiling otherwise); OpenRouter (budgets the FULL window when omitted → 402 on low credit);
     managed local llama-server (uncapped decode with no EOS burns the GPU to the context window).
+    Compression supplies its own reservation only to OpenAI-compatible routes; native and
+    compatibility wires retain their existing adapter-owned limits.
     """
+    if str(task) == "compression":
+        # The summarizer's reservation fixes low OpenAI-compatible defaults (notably
+        # 4,096 tokens). Keep the historical no-caller-cap behavior on native/
+        # compatibility wires where a hard cap consumed reasoning or truncated the
+        # summary; those adapters retain their own mandatory/native ceilings.
+        return not (
+            provider_norm == "anthropic"
+            or _is_anthropic_compat_endpoint(provider, effective_base)
+            or _nous_on_messages_wire(provider_norm, model)
+            or provider_norm in _NVIDIA_PROVIDER_NAMES
+            or base_url_host_matches(effective_base, "integrate.api.nvidia.com")
+            or provider_norm == "bedrock"
+            or _is_gemini_native_route(provider_norm, effective_base)
+        )
     return (
         _is_anthropic_compat_endpoint(provider, effective_base)
         or _nous_on_messages_wire(provider_norm, model)

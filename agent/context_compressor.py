@@ -996,6 +996,9 @@ def _build_recovery_footer(session_id: str, region_len: int) -> str:
 _LEAN_SESSION_LOG_HEADING = "## Detailed Session Log (oldest first)"
 # Extra output-token guidance for the session-log section (single response).
 _LEAN_SESSION_LOG_BUDGET_TOKENS = 4_000
+# Leave room for provider-reported reasoning tokens without forcing the visible
+# summary to stop at its prompt-level target.
+_SUMMARY_OUTPUT_HEADROOM = 1.30
 # Lean-mode prompt section appended to the summary template (byte-pinned prompt text).
 _LEAN_SESSION_LOG_SECTION = f"""
 
@@ -3713,7 +3716,9 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         self.summary_model = ""  # empty = use main model
         self._clear_compression_failure_cooldown()  # no cooldown — retry immediately
 
-    def _call_summary_llm(self, prompt: str, prompt_started_at: float) -> str:
+    def _call_summary_llm(
+        self, prompt: str, prompt_started_at: float, output_reservation: int | None = None,
+    ) -> str:
         """Issue the single aux summary call; return validated content text.
         Raises RuntimeError for empty content or a length-truncated (PARTIAL) summary so the failure
         routes through main-model fallback + cooldown instead of wiping the compacted turns."""
@@ -3726,9 +3731,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 "api_mode": self.api_mode,
             },
             "messages": [{"role": "user", "content": prompt}], "route_info": _aux_route,
-            # NO max_tokens: Anthropic/NIM wires forward it and a hard cap truncates summaries
-            # (thinking models burn it on reasoning). Timeout comes from call_llm config.
         }
+        # Internal reservation only: auxiliary_client forwards it for OpenAI-compatible
+        # compression routes and deliberately omits it on Anthropic/NIM wires.
+        if output_reservation is not None:
+            call_kwargs["max_tokens"] = output_reservation
         if self.summary_model:
             call_kwargs["model"] = self.summary_model
         # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
@@ -3824,6 +3831,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if self._previous_summary:
             self._previous_summary = _redact_compaction_text(self._previous_summary)
         summary_budget = self._compute_summary_budget(turns_to_summarize)
+        summary_target = summary_budget + (
+            _LEAN_SESSION_LOG_BUDGET_TOKENS if getattr(self, "tail_mode", "lean") == "lean" else 0
+        )
+        output_reservation = int(summary_target * _SUMMARY_OUTPUT_HEADROOM)
         # Ghost-skill defense: LLMs paraphrase [SKILL_PRUNED] markers away; collect the names
         # deterministically BEFORE the call (from the turn LIST, not the bounded text), re-inject after.
         _pruned_skill_names = list(dict.fromkeys(
@@ -3841,7 +3852,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
         prompt = self._build_summary_prompt(content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn)
         try:
-            content = self._call_summary_llm(prompt, prompt_started_at)
+            content = self._call_summary_llm(prompt, prompt_started_at, output_reservation)
             # Strip <think> blocks: they would be stored, injected, and compounded on every iterative update.
             from agent.agent_runtime_helpers import strip_think_blocks
             content = strip_think_blocks(None, content).strip() or content
