@@ -179,6 +179,12 @@ def _match_legacy_custom_provider(requested_norm: str, custom_providers) -> Opti
         if requested_norm not in custom_provider_aliases(name, provider_key):
             continue
         result = {"name": name.strip(), "base_url": base_url.strip(), "api_key": _clean(entry.get("api_key", ""))}
+        # Command that PRINTS a short-lived credential; wrapped in a per-request token provider.
+        # Mirror of ``_match_new_style_provider``: without this lift, legacy ``custom_providers``
+        # entries silently lose ``key_cmd`` and resolve with an empty/placeholder key.
+        key_cmd = _clean(entry.get("key_cmd", ""))
+        if key_cmd:
+            result["key_cmd"] = key_cmd
         model_name = _clean(entry.get("model", ""))
         if model_name:
             result["model"] = model_name

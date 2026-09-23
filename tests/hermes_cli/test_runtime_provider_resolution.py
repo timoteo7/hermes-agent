@@ -697,6 +697,40 @@ def test_bare_custom_uses_loopback_model_base_url_when_provider_not_custom(monke
     assert resolved["api_key"] == "no-key-required"
 
 
+def test_named_custom_provider_keeps_key_cmd(monkeypatch):
+    """Legacy ``custom_providers`` entries advertising ``key_cmd`` keep it through resolution."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "Gateway",
+                    "base_url": "https://gateway.invalid/v1",
+                    "key_cmd": "print-some-token",
+                    "model": "gpt-5.6",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("resolve_provider should not be called for named custom providers")
+        ),
+    )
+
+    provider = rp._get_named_custom_provider("gateway")
+
+    assert provider is not None
+    assert provider["key_cmd"] == "print-some-token"
+    resolved = rp.resolve_runtime_provider(requested="gateway")
+    assert callable(resolved["api_key"])
+
+
 def test_codex_app_server_opt_in_routes_only_named_custom_providers(monkeypatch):
     """#75186: ``model.openai_runtime: codex_app_server`` reaches a configured ``providers.<name>``
     entry (codex selects it by id from its own config); anonymous ``custom`` has no stable id and
