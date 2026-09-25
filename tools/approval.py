@@ -1229,6 +1229,54 @@ _EXECUTE_CODE_DESCRIPTION = (
     "mutate files without passing through terminal command approval; approval is one-shot for this run."
 )
 
+# FNXC:ExecuteCodePrOwnerGuard 2026-09-25-23:39:
+# execute_code can call subprocess.run(["gh", "pr", "create", ...]) directly, so the
+# terminal() bash-containment floor is not a sufficient owner boundary. Keep this rule
+# deliberately narrow: only PR-opening shapes are denied, while read-only gh/curl/API
+# calls remain available. The owner allowlist is read lazily so an operator can change
+# HERMES_PR_OPEN_ALLOW_OWNERS without restarting the runtime. FUSION_PR_OPEN_ALLOW_OWNERS
+# is accepted as a compatibility fallback for the Fusion launcher.
+_PR_OPEN_ALLOW_OWNERS_ENV = "HERMES_PR_OPEN_ALLOW_OWNERS"
+_PR_OPEN_ALLOW_OWNERS_FALLBACK_ENV = "FUSION_PR_OPEN_ALLOW_OWNERS"
+
+
+def _execute_code_pr_open_owner(code: str) -> str | None | bool:
+    """Return an owner for a PR-opening script, True when allow-listed, or None.
+
+    ``None`` means no PR-opening shape was found. ``True`` means the shape was found
+    and its owner is allow-listed. Any other string is the owner that must be denied;
+    an unresolvable owner fails closed as the empty string.
+    """
+    import re
+
+    normalized = code.replace("\\", "")
+    normalized = re.sub(r"[\"'`()\[\]{},;]", " ", normalized).lower()
+    normalized = re.sub(r"\s+", " ", normalized)
+    pr_command = re.search(r"\bgh\s+pr\s+(?:create|create-pr)\b|\bhub\s+pull-request\b", normalized)
+    pr_api = re.search(
+        r"(?:api\.github\.com/repos/|\brepos/)[a-z0-9_.-]+/[a-z0-9_.-]+/pulls\b", normalized
+    )
+    if not pr_command and not pr_api:
+        return None
+
+    owner = ""
+    for pattern in (
+        r"--repo\s+([a-z0-9_.-]+)/[a-z0-9_.-]+",
+        r"(?:api\.github\.com/repos/|\brepos/)([a-z0-9_.-]+)/[a-z0-9_.-]+",
+        r"--head\s+([a-z0-9_.-]+):",
+        r"github\.com/([a-z0-9_.-]+)/[a-z0-9_.-]+",
+    ):
+        match = re.search(pattern, normalized)
+        if match:
+            owner = match.group(1).lower()
+            break
+
+    raw_owners = os.getenv(_PR_OPEN_ALLOW_OWNERS_ENV) or os.getenv(_PR_OPEN_ALLOW_OWNERS_FALLBACK_ENV) or ""
+    allowed = {item.strip().lower() for item in raw_owners.split(",") if item.strip()}
+    if owner and owner in allowed:
+        return True
+    return owner
+
 
 def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = False) -> dict:
     """Approve an execute_code script before its child process is spawned.
@@ -1247,6 +1295,16 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     """
     pattern_key = "execute_code"
     description = _EXECUTE_CODE_DESCRIPTION
+
+    pr_open_owner = _execute_code_pr_open_owner(code)
+    if pr_open_owner is not None and pr_open_owner is not True:
+        owner = pr_open_owner or "an unknown owner"
+        return _denied(
+            f"BLOCKED: execute_code may open GitHub PRs only for allow-listed repository owners; "
+            f"target owner={owner}. Set HERMES_PR_OPEN_ALLOW_OWNERS to the owner(s) the operator controls.",
+            pattern_key="execute_code_pr_open", description=description,
+            outcome="blocked", noun="GitHub PR creation",
+        )
 
     # Isolated backends already sandbox the child. vercel_sandbox has no host-bind concept so it stays always-skipped.
     if env_type == "vercel_sandbox":
